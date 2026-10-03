@@ -21,11 +21,14 @@ struct TVLoginView: View {
 
     @State private var loginVM = LoginViewModel()
     @State private var qrVM = QRLoginViewModel()
+    @State private var server = SignInServerModel()
     @State private var advertiser = TVPairingAdvertiser()
     @State private var receiver = ReceiverPairingCoordinator()
     @State private var showPassword: Bool = false
     @State private var showPasswordForm: Bool = false
     @State private var isSubmittingPassword = false
+    /// Counts failed password attempts so the fields shake on each one.
+    @State private var passwordFailures = 0
     /// Set by `goToProfiles()`, the one place this screen moves on after a
     /// device sign-in (the QR approval and the nearby panel both land there).
     @State private var navigatedAfterApproval = false
@@ -50,26 +53,27 @@ struct TVLoginView: View {
         return true
     }
 
+    private var showsPasswordScreen: Bool { showPasswordForm || qrVM.status == .noDeviceSignIn }
+
     var body: some View {
         ZStack {
-            AuroraBackdrop(variant: .signIn, scrim: showPasswordForm || isPairing ? .soft : .left)
-            Group {
-                if isPairing {
-                    VStack(spacing: 0) {
-                        topBar
-                        Spacer(minLength: 20)
-                        TVPairingReceiverView(coordinator: receiver, advance: goToProfiles)
-                        Spacer(minLength: 0)
-                    }
-                } else if showPasswordForm || qrVM.status == .noDeviceSignIn {
-                    passwordContent
-                } else {
-                    phoneFirstContent
-                }
+            if isPairing {
+                TVPairingReceiverView(coordinator: receiver, advance: goToProfiles)
+                    .transition(.opacity)
+            } else if showsPasswordScreen {
+                passwordScreen
+                    .transition(.opacity)
+            } else {
+                codeScreen
+                    .transition(.opacity)
             }
-            .padding(.horizontal, 108)
-            .padding(.top, 64)
-            .padding(.bottom, 64)
+        }
+        .animation(.easeOut(duration: 0.32), value: isPairing)
+        .animation(.easeOut(duration: 0.32), value: showsPasswordScreen)
+        .task {
+            MarqueeScene.shared.focus = .account
+            MarqueeScene.shared.personalTint = nil
+            await server.load()
         }
         .task {
             await qrVM.begin(deviceName: Self.deviceName, devicePlatform: AppleDeviceIdentity.current.platform)
@@ -113,97 +117,45 @@ struct TVLoginView: View {
             Task { await receiver.cancel() }
             qrVM.stop()
         }
-        .ignoresSafeArea()
-    }
-
-    // MARK: - Top bar
-
-    private var topBar: some View {
-        HStack(spacing: 18) {
-            SiloWordmarkView(width: 132)
-            if let server = serverName {
-                Label(server, systemImage: "server.rack")
-                    .font(.siloCaption)
-                    .foregroundStyle(Color.auroraInkSecondary)
-            }
-            Spacer(minLength: 0)
-            AuroraJourneyProgress(currentStep: 2)
-                .frame(width: 430)
-        }
-    }
-
-    @ViewBuilder
-    private var sessionExpiredBanner: some View {
-        if router.loginNotice == .sessionExpired {
-            Label(String(format: TVSignInPresentation.sessionExpiredBanner, serverName ?? "this server"),
-                  systemImage: "exclamationmark.circle")
-                .font(.siloBody)
-                .foregroundStyle(Color.auroraInk)
-                .padding(.horizontal, 28)
-                .padding(.vertical, 16)
-                .auroraGlass(cornerRadius: 18)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 24)
-        }
     }
 
     // MARK: - Code screen
 
-    private var phoneFirstContent: some View {
-        VStack(spacing: 0) {
-            topBar
-            sessionExpiredBanner
-            Spacer(minLength: 24)
-            HStack(alignment: .center, spacing: 80) {
-                heroColumn
-                    .frame(width: 820, alignment: .leading)
-                    .focusSection()
-                codePanel
-            }
-            .frame(maxWidth: 1700)
-            Spacer(minLength: 0)
+    private var codeScreen: some View {
+        MarqueeTVScreen {
+            sessionExpiredChip
+            serverCard
+            headline("Sign in to \(server.serverName)")
+                .padding(.top, 44)
+            MarqueeTVBody(codeLead)
+                .padding(.top, 26)
+            Label(TVSignInPresentation.nearbyHint, systemImage: "iphone.gen3")
+                .font(.system(size: 22))
+                .foregroundStyle(Color.siloOnSurface.opacity(0.4))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 24)
+            codeActions
+                .padding(.top, 48)
+        } card: {
+            MarqueeTVCard { codeCard }
         }
         .defaultFocus($focusedField, offersPassword ? .usePassword : .changeServer, priority: .userInitiated)
     }
 
-    private var heroColumn: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            AuroraEyebrow(text: "Account")
-            Text("Sign in to \(serverName ?? "your server")")
-                .font(.siloTitle)
-                .foregroundStyle(Color.auroraInk)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 20)
-                .accessibilityAddTraits(.isHeader)
-
-            VStack(alignment: .leading, spacing: 20) {
-                AuroraStepRow(number: 1, text: "Scan with your phone's camera")
-                AuroraStepRow(number: 2, text: "Or go to \(typedURL ?? "your server's /activate page") and enter the code")
-                AuroraStepRow(number: 3, text: "Approve on your phone. This TV signs in by itself.")
-            }
-            .padding(.top, 36)
-
-            Label(TVSignInPresentation.nearbyHint, systemImage: "iphone.gen3")
-                .font(.siloCaption)
-                .foregroundStyle(Color.auroraInkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 30)
-
-            actionButtons
-                .padding(.top, 40)
-        }
+    private var codeLead: String {
+        let page = typedURL ?? "your server's /activate page"
+        return "Scan the code with your phone's camera, or go to \(page) and enter it. Approve on your phone and this Apple TV signs in by itself."
     }
 
-    private var actionButtons: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    private var codeActions: some View {
+        HStack(spacing: 22) {
             if let action = TVSignInPresentation.stateAction(for: qrVM.status) {
                 Button {
                     Task { await qrVM.retry() }
                 } label: {
                     Label(action == .tryAgain ? "Try again" : "Show a new code", systemImage: "arrow.clockwise")
                 }
-                .buttonStyle(AuroraPrimaryButtonStyle())
-                .frame(width: 440)
+                .buttonStyle(.marquee(.primary, fullWidth: false))
                 .focused($focusedField, equals: .stateAction)
             }
 
@@ -212,23 +164,17 @@ struct TVLoginView: View {
                     showPasswordForm = true
                     focusedField = .username
                 } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "lock.fill").font(.system(size: 20, weight: .medium))
-                        Text("Sign in with a password")
-                    }
+                    Label("Sign in with a password", systemImage: "key")
                 }
-                .buttonStyle(AuroraGhostButtonStyle())
+                .buttonStyle(.marquee(.glass, fullWidth: false))
                 .focused($focusedField, equals: .usePassword)
             }
 
-            Button {
-                changeServer()
-            } label: {
-                Text("Change server")
-            }
-            .buttonStyle(AuroraGhostButtonStyle())
-            .focused($focusedField, equals: .changeServer)
+            Button("Change server") { changeServer() }
+                .buttonStyle(.marquee(.plain, fullWidth: false))
+                .focused($focusedField, equals: .changeServer)
         }
+        .focusSection()
     }
 
     /// Whether "Sign in with a password" is offered: not on a server whose
@@ -241,67 +187,40 @@ struct TVLoginView: View {
         return false
     }
 
-    // MARK: - Code panel (right)
-
-    private var codePanel: some View {
-        VStack(spacing: 22) {
-            qrArea
-            if qrVM.showsCode, let session = qrVM.session {
-                Text(DeviceUserCode.display(session.userCode))
-                    .font(.system(size: 76, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Color.auroraInk)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                    .accessibilityLabel(Text("Code: \(Text(DeviceUserCode.spokenCharacters(session.userCode)).speechSpellsOutCharacters())"))
-                // Inset like the QR tile; a long host wraps rather than
-                // shrinking past legibility or running into the card edge.
-                Text(typedURL ?? "")
-                    .font(.siloBody)
-                    .foregroundStyle(Color.auroraInkSecondary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.7)
-                    .frame(maxWidth: Self.qrSize + 2 * Self.qrQuietZone)
-            }
-            statusLine
-        }
-        .frame(width: Self.qrSize + 2 * Self.qrQuietZone + 88)
-        .padding(.vertical, 40)
-        .auroraGlass(cornerRadius: 30)
-    }
+    // MARK: - Code card (right)
 
     @ViewBuilder
-    private var qrArea: some View {
+    private var codeCard: some View {
         if qrVM.showsCode, let session = qrVM.session {
-            qrCard {
+            qrFrame {
                 QRCodeView(content: session.verificationUriComplete, size: Self.qrSize)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
-                Text("\(TVSignInPresentation.qrAccessibilityPrefix(typedURL: typedURL ?? ""))\(Text(DeviceUserCode.spokenCharacters(session.userCode)).speechSpellsOutCharacters())")
+                Text("\(TVSignInPresentation.qrAccessibilityPrefix(typedURL: typedURL ?? ""))\(Self.spelledOut(session.userCode))")
             )
+            MarqueeCodeTiles(code: DeviceUserCode.display(session.userCode))
+                .padding(.top, 34)
+                .accessibilityLabel(Text("Code: \(Self.spelledOut(session.userCode))"))
+            // A long host wraps rather than shrinking past legibility.
+            Text(typedURL ?? "")
+                .font(.system(size: 24))
+                .foregroundStyle(Color.siloOnSurface.opacity(0.62))
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
+                .padding(.top, 18)
         } else if case .approved = qrVM.status {
-            qrCard {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 110, weight: .semibold))
-                    .foregroundStyle(Color.green)
-            }
-            .accessibilityHidden(true)
+            MarqueeTVCardSymbol(systemImage: "checkmark", tint: Color(hex: "#30D158"), size: 140)
         } else if qrVM.status.isTerminal {
-            qrCard {
-                Image(systemName: terminalSymbol)
-                    .font(.system(size: 96, weight: .regular))
-                    .foregroundStyle(Color.black.opacity(0.35))
-            }
-            .accessibilityHidden(true)
+            MarqueeTVCardSymbol(systemImage: terminalSymbol, tint: Color(hex: "#F4C869"))
         } else {
-            qrCard {
-                ProgressView()
-                    .progressViewStyle(CircularProgressViewStyle(tint: .black.opacity(0.5)))
-                    .scaleEffect(1.4)
+            qrFrame {
+                ProgressView().tint(.black.opacity(0.5)).scaleEffect(1.4)
             }
             .accessibilityHidden(true)
         }
+        statusLine
+            .padding(.top, 24)
     }
 
     private var terminalSymbol: String {
@@ -315,182 +234,188 @@ struct TVLoginView: View {
     @ViewBuilder
     private var statusLine: some View {
         if let text = TVSignInPresentation.statusLine(for: qrVM.status, codeWasRenewed: qrVM.codeWasRenewed, serverHost: serverHost) {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 14) {
                 if qrVM.status == .waiting || qrVM.status == .opened || qrVM.status == .gettingCode {
                     ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: Color.auroraAccent))
                         .scaleEffect(0.8)
                         .accessibilityHidden(true)
                 }
                 Text(text)
-                    .font(.siloCaption)
-                    .foregroundStyle(Color.auroraInkSecondary)
-                    .multilineTextAlignment(.center)
+                    .font(.system(size: 24))
+                    .foregroundStyle(Color.siloOnSurface.opacity(0.62))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: Self.qrSize + 2 * Self.qrQuietZone)
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.updatesFrequently)
         }
     }
 
-    private func qrCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        ZStack { content() }
+    private func qrFrame<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ZStack { Color.white; content() }
             .frame(width: Self.qrSize, height: Self.qrSize)
             .padding(Self.qrQuietZone)
-            .background(RoundedRectangle(cornerRadius: 18).fill(Color.white))
+            .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color.white))
             .shadow(color: .black.opacity(0.45), radius: 24, y: 14)
     }
 
-    // MARK: - Password fallback form
+    // MARK: - Password screen
 
-    private var passwordContent: some View {
-        VStack(spacing: 0) {
-            topBar
-            sessionExpiredBanner
-            Spacer(minLength: 28)
-            VStack(alignment: .leading, spacing: 24) {
-                AuroraEyebrow(text: "Account")
-                Text("Sign in with a password")
-                    .font(.siloTitle)
-                    .foregroundStyle(Color.auroraInk)
-                if qrVM.status == .noDeviceSignIn {
-                    Text("This server only supports password sign-in.")
-                        .font(.siloBody)
-                        .foregroundStyle(Color.auroraInkSecondary)
-                } else if let server = serverName {
-                    Text("Use your account for \(server).")
-                        .font(.siloBody)
-                        .foregroundStyle(Color.auroraInkSecondary)
-                }
+    private var passwordScreen: some View {
+        MarqueeTVScreen {
+            sessionExpiredChip
+            serverCard
+            headline("Sign in with\na password")
+                .padding(.top, 44)
+            MarqueeTVBody(qrVM.status == .noDeviceSignIn
+                ? "This server only supports password sign-in."
+                : "Use your \(server.serverName) username and password.")
+                .padding(.top, 22)
 
-                fieldGroup(label: "Username") {
-                    AuroraInputField(
-                        text: $loginVM.username,
-                        placeholder: "yourname",
-                        inputTitle: "Username",
+            VStack(spacing: 20) {
+                MarqueeTVField(
+                    systemImage: "person",
+                    placeholder: "Username",
+                    text: $loginVM.username,
+                    focus: $focusedField,
+                    equals: .username,
+                    content: .username
+                )
+                // Advance to the password field once the username is entered.
+                .submitLabel(.next)
+                .onSubmit { moveFocusAfterTextEntry(to: .password) }
+                HStack(spacing: 16) {
+                    MarqueeTVField(
+                        systemImage: "lock",
+                        placeholder: "Password",
+                        text: $loginVM.password,
                         focus: $focusedField,
-                        equals: .username,
-                        contentType: .username
+                        equals: .password,
+                        content: .password,
+                        isSecure: !showPassword,
+                        isError: loginVM.error != nil
                     )
-                    // Advance to the password field once the username is entered.
-                    .submitLabel(.next)
-                    .onSubmit { moveFocusAfterTextEntry(to: .password) }
-                }
+                    // Hand focus to the Sign In button once the password is entered.
+                    .submitLabel(.done)
+                    .onSubmit { moveFocusAfterTextEntry(to: .signIn) }
 
-                fieldGroup(label: "Password") {
-                    HStack(spacing: 12) {
-                        AuroraInputField(
-                            text: $loginVM.password,
-                            placeholder: "••••••",
-                            inputTitle: "Password",
-                            focus: $focusedField,
-                            equals: .password,
-                            isSecure: !showPassword,
-                            contentType: .password
-                        )
-                        // Hand focus to the Sign In button once the password is entered.
-                        .submitLabel(.done)
-                        .onSubmit { moveFocusAfterTextEntry(to: .signIn) }
-
-                        Button {
-                            showPassword.toggle()
-                        } label: {
-                            Image(systemName: showPassword ? "eye.slash.fill" : "eye.fill")
-                                .font(.system(size: 22, weight: .medium))
-                        }
-                        .buttonStyle(TVAuthIconButtonStyle())
-                        .focused($focusedField, equals: .togglePassword)
-                        .disabled(!canFocusPasswordToggle)
-                        .accessibilityLabel(showPassword ? "Hide password" : "Show password")
+                    Button {
+                        showPassword.toggle()
+                    } label: {
+                        Image(systemName: showPassword ? "eye.slash" : "eye")
                     }
+                    .buttonStyle(.marquee(.glass, fullWidth: false))
+                    .focused($focusedField, equals: .togglePassword)
+                    .disabled(!canFocusPasswordToggle)
+                    .accessibilityLabel(showPassword ? "Hide password" : "Show password")
                 }
+            }
+            .frame(width: 760)
+            .padding(.top, 40)
+            .modifier(MarqueeShake(trigger: passwordFailures))
+            .focusSection()
 
-                if let error = loginVM.error?.message {
-                    HStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .foregroundStyle(Color.requestRose)
-                        Text(error)
-                            .font(.siloCaption)
-                            .foregroundStyle(Color.requestRose)
-                    }
+            if let error = loginVM.error?.message {
+                MarqueeErrorText(error)
+                    .frame(width: 760, alignment: .leading)
+                    .padding(.top, 16)
                     .transition(.opacity)
-                }
+            }
 
+            // Single sign-on accounts have no Silo password.
+            if let hint = loginVM.phoneHintLine {
+                Text(hint)
+                    .font(.system(size: 22))
+                    .foregroundStyle(Color.siloOnSurface.opacity(0.4))
+                    .frame(width: 760, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 16)
+            }
+
+            HStack(spacing: 22) {
                 Button {
                     submitPassword()
                 } label: {
-                    Text(loginVM.isLoading || isSubmittingPassword ? "Signing in…" : "Sign in")
+                    Text(isSigningIn ? "Signing in…" : "Sign in")
                 }
-                .buttonStyle(AuroraPrimaryButtonStyle(isLoading: loginVM.isLoading || isSubmittingPassword))
+                .buttonStyle(.marquee(.primary, fullWidth: false, isLoading: isSigningIn))
                 .focused($focusedField, equals: .signIn)
-                .padding(.top, 4)
 
-                // Single sign-on accounts have no Silo password.
-                if let hint = loginVM.phoneHintLine {
-                    Text(hint)
-                        .font(.siloCaption)
-                        .foregroundStyle(Color.auroraInkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                HStack(spacing: 18) {
-                    if qrVM.status != .noDeviceSignIn {
-                        Button {
-                            returnToCodeScreen()
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "qrcode").font(.system(size: 20, weight: .medium))
-                                Text("Use your phone instead")
-                            }
-                        }
-                        .buttonStyle(AuroraGhostButtonStyle())
-                        .focused($focusedField, equals: .backToPhone)
-                        // A phone approval must not race the password in flight.
-                        .disabled(isSubmittingPassword)
-                    }
-
+                if qrVM.status != .noDeviceSignIn {
                     Button {
-                        changeServer()
+                        returnToCodeScreen()
                     } label: {
-                        Text("Change server")
+                        Label("Use your phone instead", systemImage: "qrcode")
                     }
-                    .buttonStyle(AuroraGhostButtonStyle())
-                    .focused($focusedField, equals: .changeServer)
+                    .buttonStyle(.marquee(.plain, fullWidth: false))
+                    .focused($focusedField, equals: .backToPhone)
+                    // A phone approval must not race the password in flight.
+                    .disabled(isSubmittingPassword)
                 }
-                .padding(.top, 6)
+
+                Button("Change server") { changeServer() }
+                    .buttonStyle(.marquee(.plain, fullWidth: false))
+                    .focused($focusedField, equals: .changeServer)
+                    // A password sign-in in flight would pull the app back.
+                    .disabled(isSubmittingPassword)
             }
-            .padding(48)
-            .frame(maxWidth: 780, alignment: .leading)
-            .auroraGlass(cornerRadius: 30)
-            .animation(.easeInOut(duration: 0.2), value: loginVM.error)
+            .padding(.top, 40)
             .focusSection()
-            Spacer(minLength: 0)
+        } card: {
+            MarqueeTVCard {
+                MarqueeTVCardSymbol(systemImage: "iphone")
+                Text("Type on your phone")
+                    .font(.system(size: 40, weight: .bold))
+                    .padding(.top, 34)
+                Text("When you select a field, a keyboard notification appears on nearby iPhones and iPads. Type there instead of with the remote.")
+                    .font(.system(size: 24))
+                    .foregroundStyle(Color.siloOnSurface.opacity(0.62))
+                    .padding(.top, 14)
+            }
+        }
+        .defaultFocus($focusedField, .username, priority: .userInitiated)
+        // Menu returns to the code screen; on a password-only server there is
+        // none, so Menu keeps its system meaning.
+        .onExitCommand(perform: qrVM.status == .noDeviceSignIn ? nil : returnToCodeScreen)
+        .animation(.easeInOut(duration: 0.2), value: loginVM.error)
+    }
+
+    private var isSigningIn: Bool { loginVM.isLoading || isSubmittingPassword }
+
+    // MARK: - Pieces
+
+    @ViewBuilder
+    private var sessionExpiredChip: some View {
+        if router.loginNotice == .sessionExpired {
+            MarqueeTVStatusChip(
+                text: String(format: TVSignInPresentation.sessionExpiredBanner, server.serverName),
+                systemImage: "exclamationmark.circle"
+            )
+            .padding(.bottom, 30)
         }
     }
 
-    @ViewBuilder
-    private func fieldGroup<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(label.uppercased())
-                .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                .tracking(2)
-                .foregroundStyle(Color.auroraInkTertiary)
-            content()
-        }
+    private var serverCard: some View {
+        MarqueeServerCard(
+            name: server.serverName,
+            address: server.hostLabel,
+            markURL: server.branding?.markURL,
+            badge: server.isSecure ? .init(text: "Secure", systemImage: "lock") : .init(text: "HTTP", systemImage: "lock.open", tone: .warning)
+        )
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func headline(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: MarqueeMetrics.heroFont, weight: .heavy))
+            .kerning(-2)
+            .foregroundStyle(Color.siloOnSurface)
+            .lineLimit(3)
+            .minimumScaleFactor(0.6)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityAddTraits(.isHeader)
     }
 
     // MARK: - Computed helpers
-
-    /// The server's display name, falling back to its host.
-    private var serverName: String? {
-        if let entry = ServerRegistry.shared.activeServer {
-            if let name = ServerIdentity.usable(entry.fetchedName) { return name }
-            return TVSignInPresentation.host(of: entry.url)
-        }
-        let url = AuthService.shared.serverUrl.trimmingCharacters(in: .whitespacesAndNewlines)
-        return url.isEmpty ? nil : TVSignInPresentation.host(of: url)
-    }
 
     /// The host this TV talks to, for "Can't reach <host>".
     private var serverHost: String {
@@ -504,6 +429,8 @@ struct TVLoginView: View {
         qrVM.lastVerificationUris.map { TVSignInPresentation.typedURL($0.uri, complete: $0.complete) }
     }
 
+    // MARK: - Actions
+
     /// Password sign-in and a phone approval complete once: polling pauses
     /// (a poll already in flight finishes first) and the password is only
     /// sent when the approval hasn't won. Success withdraws the code.
@@ -515,6 +442,10 @@ struct TVLoginView: View {
             guard await qrVM.suspendForPasswordSignIn() else { return }
             let succeeded = await loginVM.login(router: router)
             qrVM.finishPasswordSignIn(succeeded: succeeded)
+            if !succeeded {
+                passwordFailures += 1
+                focusedField = .password
+            }
         }
     }
 
@@ -524,6 +455,7 @@ struct TVLoginView: View {
         // screen; don't pull the app back to profiles.
         guard !navigatedAfterApproval, router.authState == route else { return }
         navigatedAfterApproval = true
+        router.skipsSingleProfilePicker = true
         router.showProfileSelection()
     }
 
@@ -587,6 +519,11 @@ struct TVLoginView: View {
         }
     }
 
+    /// The code as one element VoiceOver reads character by character.
+    private static func spelledOut(_ code: String) -> Text {
+        Text(DeviceUserCode.spokenCharacters(code)).speechSpellsOutCharacters()
+    }
+
     // MARK: - Constants
 
     /// At least a third of the 1080-point screen height.
@@ -598,41 +535,6 @@ struct TVLoginView: View {
     private static var deviceName: String {
         let name = UIDevice.current.name
         return name.isEmpty ? "Apple TV" : name
-    }
-}
-
-// MARK: - Local button styles
-
-/// Square icon-only focus affordance for the password show/hide toggle.
-struct TVAuthIconButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        TVAuthIconButtonBody(configuration: configuration)
-    }
-}
-
-private struct TVAuthIconButtonBody: View {
-    let configuration: ButtonStyle.Configuration
-    @Environment(\.isFocused) private var isFocused
-
-    var body: some View {
-        configuration.label
-            .foregroundStyle(isFocused ? Color.siloBackground : Color.white.opacity(0.7))
-            .frame(width: 56, height: 56)
-            .background(
-                RoundedRectangle(cornerRadius: SiloTheme.cornerRadius)
-                    .fill(isFocused ? Color.siloOnSurface : Color.siloSurfaceVariant)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: SiloTheme.cornerRadius)
-                            .stroke(
-                                isFocused ? Color.clear : Color.siloOutline,
-                                lineWidth: 1
-                            )
-                    )
-            )
-            .scaleEffect(isFocused ? 1.04 : 1.0)
-            .opacity(configuration.isPressed ? 0.75 : 1.0)
-            .focusEffectDisabled()
-            .animation(SiloTheme.springAnimation, value: isFocused)
     }
 }
 
